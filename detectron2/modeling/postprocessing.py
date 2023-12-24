@@ -47,12 +47,11 @@ def detector_postprocess(
 
     output_boxes = results['pred_boxes']
     scale_boxes(output_boxes, scale_x, scale_y)
-    clip_boxes(output_boxes, results['image_size'])
 
     keep = nonempty_boxes(output_boxes)
     return {
         'image_size': new_size,
-        'pred_boxes': output_boxes[keep],
+        'pred_boxes': clip_boxes(output_boxes[keep], new_size),
         'scores': results['scores'][keep],
         'pred_classes': results['pred_classes'][keep],
         'pred_densepose_coarse_segm': results['pred_densepose_coarse_segm'][keep],

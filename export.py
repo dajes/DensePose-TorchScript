@@ -12,7 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description='Export DensePose model to TorchScript module')
     parser.add_argument("cfg", type=str, help="Config file")
     parser.add_argument("model", type=str, help="Model file")
-    parser.add_argument("--min_score", default=0.8, type=float,
+    parser.add_argument("--min_score", default=0.3, type=float,
                         help="Minimum detection score to visualize")
     parser.add_argument("--nms_thresh", metavar="<threshold>", default=None, type=float,
                         help="NMS threshold")

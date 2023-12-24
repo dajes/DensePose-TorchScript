@@ -21,8 +21,8 @@ def resample_uv_tensors_to_bbox(u: torch.Tensor, v: torch.Tensor, labels: torch.
     x, y, w, h = box_xywh_abs
     w = max(int(w), 1)
     h = max(int(h), 1)
-    u_bbox = F.interpolate(u, (h, w), mode="bilinear", align_corners=False)
-    v_bbox = F.interpolate(v, (h, w), mode="bilinear", align_corners=False)
+    u_bbox = F.interpolate(u, (h, w), mode="bilinear", align_corners=False).float()
+    v_bbox = F.interpolate(v, (h, w), mode="bilinear", align_corners=False).float()
     uv = torch.zeros([2, h, w], dtype=torch.float32, device=u.device)
     for part_id in range(1, u_bbox.size(1)):
         uv[0][labels == part_id] = u_bbox[0, part_id][labels == part_id]
