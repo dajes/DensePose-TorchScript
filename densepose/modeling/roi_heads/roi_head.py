@@ -108,6 +108,8 @@ class DensePoseROIHeads(StandardROIHeads):
 
         if self.use_decoder:
             self.decoder = Decoder(cfg, input_shape, self.in_features)
+        else:
+            self.decoder = None
 
         self.densepose_pooler = ROIPooler(
             output_size=dp_pooler_resolution,
@@ -145,7 +147,7 @@ class DensePoseROIHeads(StandardROIHeads):
         features_list = [features[f] for f in self.in_features]
         pred_boxes = [x['pred_boxes'] for x in instances]
 
-        if self.use_decoder:
+        if self.decoder is not None:
             features_list = [self.decoder(features_list)]
 
         features_dp = self.densepose_pooler(features_list, pred_boxes)
