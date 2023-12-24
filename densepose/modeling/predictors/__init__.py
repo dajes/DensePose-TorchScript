@@ -1,0 +1,4 @@
+from .registry import DENSEPOSE_PREDICTOR_REGISTRY
+from .chart_confidence import DensePoseChartConfidencePredictorMixin
+from .chart import DensePoseChartPredictor
+from .chart_with_confidence import DensePoseChartWithConfidencePredictor

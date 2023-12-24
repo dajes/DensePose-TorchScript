@@ -1,0 +1,1 @@
+from .build import PROPOSAL_GENERATOR_REGISTRY, build_proposal_generator
