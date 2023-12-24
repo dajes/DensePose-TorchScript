@@ -8,7 +8,6 @@ from torch import nn
 
 from detectron2.config import configurable
 from detectron2.layers import move_device_like
-from detectron2.structures import Boxes
 from detectron2.utils.registry import Registry
 
 ANCHOR_GENERATOR_REGISTRY = Registry("ANCHOR_GENERATOR")
@@ -222,7 +221,7 @@ class DefaultAnchorGenerator(nn.Module):
             features (list[Tensor]): list of backbone feature maps on which to generate anchors.
 
         Returns:
-            list[Boxes]: a list of Boxes containing all the anchors for each feature map
+            list: a list of boxes containing all the anchors for each feature map
                 (i.e. the cell anchors repeated over all locations in the feature map).
                 The number of anchors of each feature map is Hi x Wi x num_cell_anchors,
                 where Hi, Wi are resolution of the feature map divided by anchor stride.

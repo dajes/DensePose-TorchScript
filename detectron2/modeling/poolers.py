@@ -7,15 +7,7 @@ from torch import nn
 from torchvision.ops import RoIPool
 
 from detectron2.layers import ROIAlign, cat, nonzero_tuple, shapes_to_tensor
-from detectron2.structures import Boxes, boxes_area
-
-"""
-To export ROIPooler to torchscript, in this file, variables that should be annotated with
-`Union[List[Boxes], List[RotatedBoxes]]` are only annotated with `List[Boxes]`.
-
-TODO: Correct these annotations when torchscript support `Union`.
-https://github.com/pytorch/pytorch/issues/41412
-"""
+from detectron2.structures import boxes_area
 
 __all__ = ["ROIPooler"]
 
@@ -32,7 +24,7 @@ def assign_boxes_to_levels(
     vector.
 
     Args:
-        box_lists (list[Boxes] | list[RotatedBoxes]): A list of N Boxes or N RotatedBoxes,
+        box_lists (list]): A list of N Boxes or N RotatedBoxes,
             where N is the number of images in the batch.
         min_level (int): Smallest feature map level index. The input is considered index 0,
             the output of stage 1 is index 1, and so.
@@ -75,22 +67,16 @@ def convert_boxes_to_pooler_format(box_lists: List[torch.Tensor]):
     (see description under Returns).
 
     Args:
-        box_lists (list[Boxes] | list[RotatedBoxes]):
+        box_lists (list):
             A list of N Boxes or N RotatedBoxes, where N is the number of images in the batch.
 
     Returns:
-        When input is list[Boxes]:
+        When input is list:
             A tensor of shape (M, 5), where M is the total number of boxes aggregated over all
             N batch images.
             The 5 columns are (batch index, x0, y0, x1, y1), where batch index
             is the index in [0, N) identifying which batch image the box with corners at
             (x0, y0, x1, y1) comes from.
-        When input is list[RotatedBoxes]:
-            A tensor of shape (M, 6), where M is the total number of boxes aggregated over all
-            N batch images.
-            The 6 columns are (batch index, x_ctr, y_ctr, width, height, angle_degrees),
-            where batch index is the index in [0, N) identifying which batch image the
-            rotated box (x_ctr, y_ctr, width, height, angle_degrees) comes from.
     """
     boxes = torch.cat(box_lists, dim=0)
     # __len__ returns Tensor in tracing.
@@ -203,7 +189,7 @@ class ROIPooler(nn.Module):
         Args:
             x (list[Tensor]): A list of feature maps of NCHW shape, with scales matching those
                 used to construct this module.
-            box_lists (list[Boxes] | list[RotatedBoxes]):
+            box_lists (list):
                 A list of N Boxes or N RotatedBoxes, where N is the number of images in the batch.
                 The box coordinates are defined on the original image and
                 will be scaled by the `scales` argument of :class:`ROIPooler`.
