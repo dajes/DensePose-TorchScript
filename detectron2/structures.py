@@ -3,327 +3,15 @@ from __future__ import division
 
 import itertools
 import math
-import warnings
 from enum import IntEnum, unique
-from typing import Any, Iterator
-from typing import Dict
-from typing import List, Tuple, Union
-from typing import Optional
+from typing import Any, List, Tuple, Union
+from typing import Iterator
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from detectron2.layers.roi_align import ROIAlign
-
-
-class ImageList:
-    """
-    Structure that holds a list of images (of possibly
-    varying sizes) as a single tensor.
-    This works by padding the images to the same size.
-    The original sizes of each image is stored in `image_sizes`.
-
-    Attributes:
-        image_sizes (list[tuple[int, int]]): each tuple is (h, w).
-            During tracing, it becomes list[Tensor] instead.
-    """
-
-    def __init__(self, tensor: torch.Tensor, image_sizes: List[Tuple[int, int]]):
-        """
-        Arguments:
-            tensor (Tensor): of shape (N, H, W) or (N, C_1, ..., C_K, H, W) where K >= 1
-            image_sizes (list[tuple[int, int]]): Each tuple is (h, w). It can
-                be smaller than (H, W) due to padding.
-        """
-        self.tensor = tensor
-        self.image_sizes = image_sizes
-
-    def __len__(self) -> int:
-        return len(self.image_sizes)
-
-    def __getitem__(self, idx) -> torch.Tensor:
-        """
-        Access the individual image in its original size.
-
-        Args:
-            idx: int or slice
-
-        Returns:
-            Tensor: an image of shape (H, W) or (C_1, ..., C_K, H, W) where K >= 1
-        """
-        size = self.image_sizes[idx]
-        return self.tensor[idx, ..., : size[0], : size[1]]
-
-    @torch.jit.unused
-    def to(self, *args: Any, **kwargs: Any) -> "ImageList":
-        cast_tensor = self.tensor.to(*args, **kwargs)
-        return ImageList(cast_tensor, self.image_sizes)
-
-    @property
-    def device(self) -> torch.device:
-        return self.tensor.device
-
-    @staticmethod
-    def from_tensors(
-            tensors: List[torch.Tensor],
-            size_divisibility: int = 0,
-            pad_value: float = 0.0,
-            padding_constraints: Optional[Dict[str, int]] = None,
-    ) -> "ImageList":
-        """
-        Args:
-            tensors: a tuple or list of `torch.Tensor`, each of shape (Hi, Wi) or
-                (C_1, ..., C_K, Hi, Wi) where K >= 1. The Tensors will be padded
-                to the same shape with `pad_value`.
-            size_divisibility (int): If `size_divisibility > 0`, add padding to ensure
-                the common height and width is divisible by `size_divisibility`.
-                This depends on the model and many models need a divisibility of 32.
-            pad_value (float): value to pad.
-            padding_constraints (optional[Dict]): If given, it would follow the format as
-                {"size_divisibility": int, "square_size": int}, where `size_divisibility` will
-                overwrite the above one if presented and `square_size` indicates the
-                square padding size if `square_size` > 0.
-        Returns:
-            an `ImageList`.
-        """
-        assert len(tensors) > 0
-        assert isinstance(tensors, (tuple, list))
-        for t in tensors:
-            assert isinstance(t, torch.Tensor), type(t)
-            assert t.shape[:-2] == tensors[0].shape[:-2], t.shape
-
-        image_sizes = [(im.shape[-2], im.shape[-1]) for im in tensors]
-        image_sizes_tensor = [torch.as_tensor(x) for x in image_sizes]
-        max_size = torch.stack(image_sizes_tensor).max(0).values
-
-        if padding_constraints is not None:
-            square_size = padding_constraints.get("square_size", 0)
-            if square_size > 0:
-                # pad to square.
-                max_size[0] = max_size[1] = square_size
-            if "size_divisibility" in padding_constraints:
-                size_divisibility = padding_constraints["size_divisibility"]
-        if size_divisibility > 1:
-            stride = size_divisibility
-            # the last two dims are H,W, both subject to divisibility requirement
-            max_size = (max_size + (stride - 1)).div(stride, rounding_mode="floor") * stride
-
-        # handle weirdness of scripting and tracing ...
-        if torch.jit.is_scripting():
-            max_size: List[int] = max_size.to(dtype=torch.long).tolist()
-        else:
-            if torch.jit.is_tracing():
-                image_sizes = image_sizes_tensor
-
-        if len(tensors) == 1:
-            # This seems slightly (2%) faster.
-            # TODO: check whether it's faster for multiple images as well
-            image_size = image_sizes[0]
-            padding_size = [0, max_size[-1] - image_size[1], 0, max_size[-2] - image_size[0]]
-            batched_imgs = F.pad(tensors[0], padding_size, value=pad_value).unsqueeze_(0)
-        else:
-            # max_size can be a tensor in tracing mode, therefore convert to list
-            batch_shape = [len(tensors)] + list(tensors[0].shape[:-2]) + list(max_size)
-            device = (
-                None if torch.jit.is_scripting() else ("cpu" if torch.jit.is_tracing() else None)
-            )
-            batched_imgs = tensors[0].new_full(batch_shape, pad_value, device=device)
-            batched_imgs = batched_imgs.to(tensors[0].device)
-            for i, img in enumerate(tensors):
-                # Use `batched_imgs` directly instead of `img, pad_img = zip(tensors, batched_imgs)`
-                # Tracing mode cannot capture `copy_()` of temporary locals
-                batched_imgs[i, ..., : img.shape[-2], : img.shape[-1]].copy_(img)
-
-        return ImageList(batched_imgs.contiguous(), image_sizes)
-
-
-class Instances:
-    """
-    This class represents a list of instances in an image.
-    It stores the attributes of instances (e.g., boxes, masks, labels, scores) as "fields".
-    All fields must have the same ``__len__`` which is the number of instances.
-
-    All other (non-field) attributes of this class are considered private:
-    they must start with '_' and are not modifiable by a user.
-
-    Some basic usage:
-
-    1. Set/get/check a field:
-
-       .. code-block:: python
-
-          instances.gt_boxes = Boxes(...)
-          print(instances.pred_masks)  # a tensor of shape (N, H, W)
-          print('gt_masks' in instances)
-
-    2. ``len(instances)`` returns the number of instances
-    3. Indexing: ``instances[indices]`` will apply the indexing on all the fields
-       and returns a new :class:`Instances`.
-       Typically, ``indices`` is a integer vector of indices,
-       or a binary mask of length ``num_instances``
-
-       .. code-block:: python
-
-          category_3_detections = instances[instances.pred_classes == 3]
-          confident_detections = instances[instances.scores > 0.9]
-    """
-
-    def __init__(self, image_size: Tuple[int, int], **kwargs: Any):
-        """
-        Args:
-            image_size (height, width): the spatial size of the image.
-            kwargs: fields to add to this `Instances`.
-        """
-        self._image_size = image_size
-        self._fields: Dict[str, Any] = {}
-        for k, v in kwargs.items():
-            self.set(k, v)
-
-    @property
-    def image_size(self) -> Tuple[int, int]:
-        """
-        Returns:
-            tuple: height, width
-        """
-        return self._image_size
-
-    def __setattr__(self, name: str, val: Any) -> None:
-        if name.startswith("_"):
-            super().__setattr__(name, val)
-        else:
-            self.set(name, val)
-
-    def __getattr__(self, name: str) -> Any:
-        if name == "_fields" or name not in self._fields:
-            raise AttributeError("Cannot find field '{}' in the given Instances!".format(name))
-        return self._fields[name]
-
-    def set(self, name: str, value: Any) -> None:
-        """
-        Set the field named `name` to `value`.
-        The length of `value` must be the number of instances,
-        and must agree with other existing fields in this object.
-        """
-        with warnings.catch_warnings(record=True):
-            data_len = len(value)
-        if len(self._fields):
-            assert (
-                    len(self) == data_len
-            ), "Adding a field of length {} to a Instances of length {}".format(data_len, len(self))
-        self._fields[name] = value
-
-    def has(self, name: str) -> bool:
-        """
-        Returns:
-            bool: whether the field called `name` exists.
-        """
-        return name in self._fields
-
-    def remove(self, name: str) -> None:
-        """
-        Remove the field called `name`.
-        """
-        del self._fields[name]
-
-    def get(self, name: str) -> Any:
-        """
-        Returns the field called `name`.
-        """
-        return self._fields[name]
-
-    def get_fields(self) -> Dict[str, Any]:
-        """
-        Returns:
-            dict: a dict which maps names (str) to data of the fields
-
-        Modifying the returned dict will modify this instance.
-        """
-        return self._fields
-
-    # Tensor-like methods
-    def to(self, *args: Any, **kwargs: Any) -> "Instances":
-        """
-        Returns:
-            Instances: all fields are called with a `to(device)`, if the field has this method.
-        """
-        ret = Instances(self._image_size)
-        for k, v in self._fields.items():
-            if hasattr(v, "to"):
-                v = v.to(*args, **kwargs)
-            ret.set(k, v)
-        return ret
-
-    def __getitem__(self, item: Union[int, slice, torch.BoolTensor]) -> "Instances":
-        """
-        Args:
-            item: an index-like object and will be used to index all the fields.
-
-        Returns:
-            If `item` is a string, return the data in the corresponding field.
-            Otherwise, returns an `Instances` where all fields are indexed by `item`.
-        """
-        if type(item) == int:
-            if item >= len(self) or item < -len(self):
-                raise IndexError("Instances index out of range!")
-            else:
-                item = slice(item, None, len(self))
-
-        ret = Instances(self._image_size)
-        for k, v in self._fields.items():
-            ret.set(k, v[item])
-        return ret
-
-    def __len__(self) -> int:
-        for v in self._fields.values():
-            # use __len__ because len() has to be int and is not friendly to tracing
-            return v.__len__()
-        raise NotImplementedError("Empty Instances does not support __len__!")
-
-    def __iter__(self):
-        raise NotImplementedError("`Instances` object is not iterable!")
-
-    @staticmethod
-    def cat(instance_lists: List["Instances"]) -> "Instances":
-        """
-        Args:
-            instance_lists (list[Instances])
-
-        Returns:
-            Instances
-        """
-        assert all(isinstance(i, Instances) for i in instance_lists)
-        assert len(instance_lists) > 0
-        if len(instance_lists) == 1:
-            return instance_lists[0]
-
-        image_size = instance_lists[0].image_size
-        if not isinstance(image_size, torch.Tensor):  # could be a tensor in tracing
-            for i in instance_lists[1:]:
-                assert i.image_size == image_size
-        ret = Instances(image_size)
-        for k in instance_lists[0]._fields.keys():
-            values = [i.get(k) for i in instance_lists]
-            v0 = values[0]
-            if isinstance(v0, torch.Tensor):
-                values = torch.cat(values, dim=0)
-            elif isinstance(v0, list):
-                values = list(itertools.chain(*values))
-            elif hasattr(type(v0), "cat"):
-                values = type(v0).cat(values)
-            else:
-                raise ValueError("Unsupported type {} for concatenation".format(type(v0)))
-            ret.set(k, values)
-        return ret
-
-    def __str__(self) -> str:
-        s = self.__class__.__name__ + "("
-        s += "num_instances={}, ".format(len(self))
-        s += "image_height={}, ".format(self._image_size[0])
-        s += "image_width={}, ".format(self._image_size[1])
-        s += "fields=[{}])".format(", ".join((f"{k}: {v}" for k, v in self._fields.items())))
-        return s
-
-    __repr__ = __str__
 
 
 def polygon_area(x, y):
@@ -1134,109 +822,6 @@ def matched_pairwise_iou(boxes1: Boxes, boxes2: Boxes) -> torch.Tensor:
     return iou
 
 
-# Copyright (c) Facebook, Inc. and its affiliates.
-import numpy as np
-from typing import Any, List, Tuple, Union
-import torch
-from torch.nn import functional as F
-
-
-class Keypoints:
-    """
-    Stores keypoint **annotation** data. GT Instances have a `gt_keypoints` property
-    containing the x,y location and visibility flag of each keypoint. This tensor has shape
-    (N, K, 3) where N is the number of instances and K is the number of keypoints per instance.
-
-    The visibility flag follows the COCO format and must be one of three integers:
-
-    * v=0: not labeled (in which case x=y=0)
-    * v=1: labeled but not visible
-    * v=2: labeled and visible
-    """
-
-    def __init__(self, keypoints: Union[torch.Tensor, np.ndarray, List[List[float]]]):
-        """
-        Arguments:
-            keypoints: A Tensor, numpy array, or list of the x, y, and visibility of each keypoint.
-                The shape should be (N, K, 3) where N is the number of
-                instances, and K is the number of keypoints per instance.
-        """
-        device = keypoints.device if isinstance(keypoints, torch.Tensor) else torch.device("cpu")
-        keypoints = torch.as_tensor(keypoints, dtype=torch.float32, device=device)
-        assert keypoints.dim() == 3 and keypoints.shape[2] == 3, keypoints.shape
-        self.tensor = keypoints
-
-    def __len__(self) -> int:
-        return self.tensor.size(0)
-
-    def to(self, *args: Any, **kwargs: Any) -> "Keypoints":
-        return type(self)(self.tensor.to(*args, **kwargs))
-
-    @property
-    def device(self) -> torch.device:
-        return self.tensor.device
-
-    def to_heatmap(self, boxes: torch.Tensor, heatmap_size: int) -> torch.Tensor:
-        """
-        Convert keypoint annotations to a heatmap of one-hot labels for training,
-        as described in :paper:`Mask R-CNN`.
-
-        Arguments:
-            boxes: Nx4 tensor, the boxes to draw the keypoints to
-
-        Returns:
-            heatmaps:
-                A tensor of shape (N, K), each element is integer spatial label
-                in the range [0, heatmap_size**2 - 1] for each keypoint in the input.
-            valid:
-                A tensor of shape (N, K) containing whether each keypoint is in the roi or not.
-        """
-        return _keypoints_to_heatmap(self.tensor, boxes, heatmap_size)
-
-    def __getitem__(self, item: Union[int, slice, torch.BoolTensor]) -> "Keypoints":
-        """
-        Create a new `Keypoints` by indexing on this `Keypoints`.
-
-        The following usage are allowed:
-
-        1. `new_kpts = kpts[3]`: return a `Keypoints` which contains only one instance.
-        2. `new_kpts = kpts[2:10]`: return a slice of key points.
-        3. `new_kpts = kpts[vector]`, where vector is a torch.ByteTensor
-           with `length = len(kpts)`. Nonzero elements in the vector will be selected.
-
-        Note that the returned Keypoints might share storage with this Keypoints,
-        subject to Pytorch's indexing semantics.
-        """
-        if isinstance(item, int):
-            return Keypoints([self.tensor[item]])
-        return Keypoints(self.tensor[item])
-
-    def __repr__(self) -> str:
-        s = self.__class__.__name__ + "("
-        s += "num_instances={})".format(len(self.tensor))
-        return s
-
-    @staticmethod
-    def cat(keypoints_list: List["Keypoints"]) -> "Keypoints":
-        """
-        Concatenates a list of Keypoints into a single Keypoints
-
-        Arguments:
-            keypoints_list (list[Keypoints])
-
-        Returns:
-            Keypoints: the concatenated Keypoints
-        """
-        assert isinstance(keypoints_list, (list, tuple))
-        assert len(keypoints_list) > 0
-        assert all(isinstance(keypoints, Keypoints) for keypoints in keypoints_list)
-
-        cat_kpts = type(keypoints_list[0])(
-            torch.cat([kpts.tensor for kpts in keypoints_list], dim=0)
-        )
-        return cat_kpts
-
-
 # TODO make this nicer, this is a direct translation from C2 (but removing the inner loop)
 def _keypoints_to_heatmap(
         keypoints: torch.Tensor, rois: torch.Tensor, heatmap_size: int
@@ -1369,3 +954,39 @@ def heatmaps_to_keypoints(maps: torch.Tensor, rois: torch.Tensor) -> torch.Tenso
         xy_preds[i, :, 3] = roi_map_scores[keypoints_idx, y_int, x_int]
 
     return xy_preds
+
+
+def clip_boxes(boxes, img_size):
+    x1 = boxes[:, 0].clamp(min=0, max=img_size[1])
+    y1 = boxes[:, 1].clamp(min=0, max=img_size[0])
+    x2 = boxes[:, 2].clamp(min=0, max=img_size[1])
+    y2 = boxes[:, 3].clamp(min=0, max=img_size[0])
+    return torch.stack((x1, y1, x2, y2), dim=-1)
+
+
+def nonempty_boxes(boxes, threshold: float = 0.):
+    """
+    Remove empty boxes (width or height < threshold)
+    """
+    ws = boxes[:, 2] - boxes[:, 0]
+    hs = boxes[:, 3] - boxes[:, 1]
+    keep = (ws >= threshold) & (hs >= threshold)
+    return keep
+
+
+def boxes_area(boxes):
+    """
+    Compute the area of an array of boxes.
+    """
+    return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+
+
+def scale_boxes(boxes, scale_x, scale_y):
+    """
+    Scale an array of boxes by a scale factor.
+    """
+    boxes[:, 0] *= scale_x
+    boxes[:, 1] *= scale_y
+    boxes[:, 2] *= scale_x
+    boxes[:, 3] *= scale_y
+    return boxes

@@ -8,7 +8,6 @@ from torch import nn
 from detectron2.config import configurable
 from detectron2.layers import Conv2d, ConvTranspose2d, cat, get_norm
 from detectron2.layers.wrappers import move_device_like
-from detectron2.structures import Instances
 from detectron2.utils.registry import Registry
 
 __all__ = [
@@ -27,7 +26,7 @@ The registered object will be called with `obj(cfg, input_shape)`.
 """
 
 
-def mask_rcnn_inference(pred_mask_logits: torch.Tensor, pred_instances: List[Instances]):
+def mask_rcnn_inference(pred_mask_logits: torch.Tensor, pred_instances: List[torch.Tensor]):
     """
     Convert pred_mask_logits to estimated foreground probability masks while also
     extracting only the masks for the predicted classes in pred_instances. For each
@@ -39,8 +38,8 @@ def mask_rcnn_inference(pred_mask_logits: torch.Tensor, pred_instances: List[Ins
             for class-specific or class-agnostic, where B is the total number of predicted masks
             in all images, C is the number of foreground classes, and Hmask, Wmask are the height
             and width of the mask predictions. The values are logits.
-        pred_instances (list[Instances]): A list of N Instances, where N is the number of images
-            in the batch. Each Instances must have field "pred_classes".
+        pred_instances (list): A list of N, where N is the number of images
+            in the batch. Each must have field "pred_classes".
 
     Returns:
         None. pred_instances will contain an extra "pred_masks" field storing a mask of size (Hmask,
@@ -95,11 +94,11 @@ class BaseMaskRCNNHead(nn.Module):
     def from_config(cls, cfg, input_shape):
         return {"vis_period": cfg.VIS_PERIOD}
 
-    def forward(self, x, instances: List[Instances]):
+    def forward(self, x, instances: List[torch.Tensor]):
         """
         Args:
             x: input region feature(s) provided by :class:`ROIHeads`.
-            instances (list[Instances]): contains the boxes & labels corresponding
+            instances (list): contains the boxes & labels corresponding
                 to the input features.
                 Exact format is up to its caller to decide.
                 Typically, this is the foreground instances in training, with

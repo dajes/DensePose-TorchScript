@@ -1,12 +1,12 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import math
+
 import fvcore.nn.weight_init as weight_init
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from detectron2.layers import Conv2d, get_norm
-
 from .backbone import Backbone
 from .build import BACKBONE_REGISTRY
 from .resnet import build_resnet_backbone
@@ -23,14 +23,14 @@ class FPN(Backbone):
     _fuse_type: torch.jit.Final[str]
 
     def __init__(
-        self,
-        bottom_up,
-        in_features,
-        out_channels,
-        norm="",
-        top_block=None,
-        fuse_type="sum",
-        square_pad=0,
+            self,
+            bottom_up,
+            in_features,
+            out_channels,
+            norm="",
+            top_block=None,
+            fuse_type="sum",
+            square_pad=0,
     ):
         """
         Args:
@@ -66,8 +66,8 @@ class FPN(Backbone):
         in_channels_per_feature = [input_shapes[f]['channels'] for f in in_features]
 
         _assert_strides_are_log2_contiguous(strides)
-        lateral_convs = []
-        output_convs = []
+        lateral_convs = nn.ModuleList()
+        output_convs = nn.ModuleList()
 
         use_bias = norm == ""
         for idx, in_channels in enumerate(in_channels_per_feature):
@@ -92,12 +92,12 @@ class FPN(Backbone):
             self.add_module("fpn_lateral{}".format(stage), lateral_conv)
             self.add_module("fpn_output{}".format(stage), output_conv)
 
-            lateral_convs.append(lateral_conv)
-            output_convs.append(output_conv)
-        # Place convs into top-down order (from low to high resolution)
-        # to make the top-down computation in forward clearer.
-        self.lateral_convs = lateral_convs[::-1]
-        self.output_convs = output_convs[::-1]
+            # Place convs into top-down order (from low to high resolution)
+            # to make the top-down computation in forward clearer.
+            lateral_convs.insert(0, lateral_conv)
+            output_convs.insert(0, output_conv)
+        self.lateral_convs = lateral_convs
+        self.output_convs = output_convs
         self.top_block = top_block
         self.in_features = tuple(in_features)
         self.bottom_up = bottom_up
@@ -112,7 +112,6 @@ class FPN(Backbone):
         self._out_feature_channels = {k: out_channels for k in self._out_features}
         self._size_divisibility = strides[-1]
         self._square_pad = square_pad
-        assert fuse_type in {"avg", "sum"}
         self._fuse_type = fuse_type
 
     @property
@@ -143,7 +142,7 @@ class FPN(Backbone):
 
         # Reverse feature maps into top-down order (from low to high resolution)
         for idx, (lateral_conv, output_conv) in enumerate(
-            zip(self.lateral_convs, self.output_convs)
+                zip(self.lateral_convs, self.output_convs)
         ):
             # Slicing of ModuleList is not supported https://github.com/pytorch/pytorch/issues/47336
             # Therefore we loop over all modules but skip the first one

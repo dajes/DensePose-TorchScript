@@ -1,17 +1,15 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-from dataclasses import fields
-from typing import Any, List
+from typing import List, Dict
 
 import torch
 
-from detectron2.structures import Instances
 
-
-def densepose_inference(densepose_predictor_output: Any, detections: List[Instances]) -> None:
+def densepose_inference(densepose_predictor_output: Dict[str, torch.Tensor],
+                        detections: List[Dict[str, torch.Tensor]]) -> None:
     """
     Splits DensePose predictor outputs into chunks, each chunk corresponds to
     detections on one image. Predictor output chunks are stored in `pred_densepose`
-    attribute of the corresponding `Instances` object.
+    attribute of the corresponding object.
 
     Args:
         densepose_predictor_output: a dataclass instance (can be of different types,
@@ -26,20 +24,9 @@ def densepose_inference(densepose_predictor_output: Any, detections: List[Instan
     k = 0
     for detection_i in detections:
         if densepose_predictor_output is None:
-            # don't add `pred_densepose` attribute
             continue
-        n_i = detection_i.__len__()
-
-        PredictorOutput = type(densepose_predictor_output)
-        output_i_dict = {}
-        # we assume here that `densepose_predictor_output` is a dataclass object
-        for field in fields(densepose_predictor_output):
-            field_value = getattr(densepose_predictor_output, field.name)
-            # slice tensors
+        n_i = detection_i['scores'].shape[0]
+        for field, field_value in densepose_predictor_output.items():
             if isinstance(field_value, torch.Tensor):
-                output_i_dict[field.name] = field_value[k: k + n_i]
-            # leave others as is
-            else:
-                output_i_dict[field.name] = field_value
-        detection_i.pred_densepose = PredictorOutput(**output_i_dict)
+                detection_i[f'pred_densepose_{field}'] = field_value[k: k + n_i]
         k += n_i

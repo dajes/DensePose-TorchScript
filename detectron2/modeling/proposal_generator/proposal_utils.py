@@ -1,10 +1,10 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-import math
-from typing import List, Tuple, Union
+from typing import List
+
 import torch
 
 from detectron2.layers import batched_nms, cat, move_device_like
-from detectron2.structures import Boxes, Instances
+from detectron2.structures import clip_boxes, nonempty_boxes
 
 
 def _is_tracing():
@@ -17,14 +17,14 @@ def _is_tracing():
 
 
 def find_top_rpn_proposals(
-    proposals: List[torch.Tensor],
-    pred_objectness_logits: List[torch.Tensor],
-    image_sizes: List[Tuple[int, int]],
-    nms_thresh: float,
-    pre_nms_topk: int,
-    post_nms_topk: int,
-    min_box_size: float,
-    training: bool,
+        proposals: List[torch.Tensor],
+        pred_objectness_logits: List[torch.Tensor],
+        image_sizes: List[torch.Tensor],
+        nms_thresh: float,
+        pre_nms_topk: int,
+        post_nms_topk: int,
+        min_box_size: float,
+        training: bool,
 ):
     """
     For each feature map, select the `pre_nms_topk` highest scoring proposals,
@@ -50,7 +50,7 @@ def find_top_rpn_proposals(
             comment.
 
     Returns:
-        list[Instances]: list of N Instances. The i-th Instances
+        list: list of N. The i-th
             stores post_nms_topk object proposals for image i, sorted by their
             objectness score in descending order.
     """
@@ -93,13 +93,13 @@ def find_top_rpn_proposals(
     level_ids = cat(level_ids, dim=0)
 
     # 3. For each image, run a per-level NMS, and choose topk results.
-    results: List[Instances] = []
+    results: List[dict[str, torch.Tensor]] = []
     for n, image_size in enumerate(image_sizes):
-        boxes = Boxes(topk_proposals[n])
+        boxes = topk_proposals[n]
         scores_per_img = topk_scores[n]
         lvl = level_ids
 
-        valid_mask = torch.isfinite(boxes.tensor).all(dim=1) & torch.isfinite(scores_per_img)
+        valid_mask = torch.isfinite(boxes).all(dim=1) & torch.isfinite(scores_per_img)
         if not valid_mask.all():
             if training:
                 raise FloatingPointError(
@@ -108,14 +108,14 @@ def find_top_rpn_proposals(
             boxes = boxes[valid_mask]
             scores_per_img = scores_per_img[valid_mask]
             lvl = lvl[valid_mask]
-        boxes.clip(image_size)
+        boxes = clip_boxes(boxes, image_size)
 
         # filter empty boxes
-        keep = boxes.nonempty(threshold=min_box_size)
+        keep = nonempty_boxes(boxes, threshold=min_box_size)
         if _is_tracing() or keep.sum().item() != len(boxes):
             boxes, scores_per_img, lvl = boxes[keep], scores_per_img[keep], lvl[keep]
 
-        keep = batched_nms(boxes.tensor, scores_per_img, lvl, nms_thresh)
+        keep = batched_nms(boxes, scores_per_img, lvl, nms_thresh)
         # In Detectron1, there was different behavior during training vs. testing.
         # (https://github.com/facebookresearch/Detectron/issues/459)
         # During training, topk is over the proposals from *all* images in the training batch.
@@ -125,78 +125,10 @@ def find_top_rpn_proposals(
         # This bug is addressed in Detectron2 to make the behavior independent of batch size.
         keep = keep[:post_nms_topk]  # keep is already sorted
 
-        res = Instances(image_size)
-        res.proposal_boxes = boxes[keep]
-        res.objectness_logits = scores_per_img[keep]
+        res = {
+            'image_size': image_size,
+            'proposal_boxes': boxes[keep],
+            'objectness_logits': scores_per_img[keep],
+        }
         results.append(res)
     return results
-
-
-def add_ground_truth_to_proposals(
-    gt: Union[List[Instances], List[Boxes]], proposals: List[Instances]
-) -> List[Instances]:
-    """
-    Call `add_ground_truth_to_proposals_single_image` for all images.
-
-    Args:
-        gt(Union[List[Instances], List[Boxes]): list of N elements. Element i is a Instances
-            representing the ground-truth for image i.
-        proposals (list[Instances]): list of N elements. Element i is a Instances
-            representing the proposals for image i.
-
-    Returns:
-        list[Instances]: list of N Instances. Each is the proposals for the image,
-            with field "proposal_boxes" and "objectness_logits".
-    """
-    assert gt is not None
-
-    if len(proposals) != len(gt):
-        raise ValueError("proposals and gt should have the same length as the number of images!")
-    if len(proposals) == 0:
-        return proposals
-
-    return [
-        add_ground_truth_to_proposals_single_image(gt_i, proposals_i)
-        for gt_i, proposals_i in zip(gt, proposals)
-    ]
-
-
-def add_ground_truth_to_proposals_single_image(
-    gt: Union[Instances, Boxes], proposals: Instances
-) -> Instances:
-    """
-    Augment `proposals` with `gt`.
-
-    Args:
-        Same as `add_ground_truth_to_proposals`, but with gt and proposals
-        per image.
-
-    Returns:
-        Same as `add_ground_truth_to_proposals`, but for only one image.
-    """
-    if isinstance(gt, Boxes):
-        # convert Boxes to Instances
-        gt = Instances(proposals.image_size, gt_boxes=gt)
-
-    gt_boxes = gt.gt_boxes
-    device = proposals.objectness_logits.device
-    # Assign all ground-truth boxes an objectness logit corresponding to
-    # P(object) = sigmoid(logit) =~ 1.
-    gt_logit_value = math.log((1.0 - 1e-10) / (1 - (1.0 - 1e-10)))
-    gt_logits = gt_logit_value * torch.ones(len(gt_boxes), device=device)
-
-    # Concatenating gt_boxes with proposals requires them to have the same fields
-    gt_proposal = Instances(proposals.image_size, **gt.get_fields())
-    gt_proposal.proposal_boxes = gt_boxes
-    gt_proposal.objectness_logits = gt_logits
-
-    for key in proposals.get_fields().keys():
-        assert gt_proposal.has(
-            key
-        ), "The attribute '{}' in `proposals` does not exist in `gt`".format(key)
-
-    # NOTE: Instances.cat only use fields from the first item. Extra fields in latter items
-    # will be thrown away.
-    new_proposals = Instances.cat([proposals, gt_proposal])
-
-    return new_proposals

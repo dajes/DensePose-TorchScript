@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-import numpy as np
 import fvcore.nn.weight_init as weight_init
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -10,7 +10,6 @@ from detectron2.layers import (
     Conv2d,
     get_norm,
 )
-
 from .backbone import Backbone
 from .build import BACKBONE_REGISTRY
 
@@ -101,16 +100,16 @@ class BottleneckBlock(CNNBlockBase):
     """
 
     def __init__(
-        self,
-        in_channels,
-        out_channels,
-        *,
-        bottleneck_channels,
-        stride=1,
-        num_groups=1,
-        norm="BN",
-        stride_in_1x1=False,
-        dilation=1,
+            self,
+            in_channels,
+            out_channels,
+            *,
+            bottleneck_channels,
+            stride=1,
+            num_groups=1,
+            norm="BN",
+            stride_in_1x1=False,
+            dilation=1,
     ):
         """
         Args:
@@ -213,18 +212,18 @@ class DeformBottleneckBlock(CNNBlockBase):
     """
 
     def __init__(
-        self,
-        in_channels,
-        out_channels,
-        *,
-        bottleneck_channels,
-        stride=1,
-        num_groups=1,
-        norm="BN",
-        stride_in_1x1=False,
-        dilation=1,
-        deform_modulated=False,
-        deform_num_groups=1,
+            self,
+            in_channels,
+            out_channels,
+            *,
+            bottleneck_channels,
+            stride=1,
+            num_groups=1,
+            norm="BN",
+            stride_in_1x1=False,
+            dilation=1,
+            deform_modulated=False,
+            deform_num_groups=1,
     ):
         super().__init__(in_channels, out_channels, stride)
         self.deform_modulated = deform_modulated
@@ -382,7 +381,7 @@ class ResNet(Backbone):
         self._out_feature_strides = {"stem": current_stride}
         self._out_feature_channels = {"stem": self.stem.out_channels}
 
-        self.stage_names, self.stages = [], []
+        self.stage_names, self.stages = [], nn.ModuleList()
 
         if out_features is not None:
             # Avoid keeping unused layers in this module. They consume extra memory
@@ -623,19 +622,19 @@ def build_resnet_backbone(cfg, input_shape):
     )
 
     # fmt: off
-    freeze_at           = cfg.MODEL.BACKBONE.FREEZE_AT
-    out_features        = cfg.MODEL.RESNETS.OUT_FEATURES
-    depth               = cfg.MODEL.RESNETS.DEPTH
-    num_groups          = cfg.MODEL.RESNETS.NUM_GROUPS
-    width_per_group     = cfg.MODEL.RESNETS.WIDTH_PER_GROUP
+    freeze_at = cfg.MODEL.BACKBONE.FREEZE_AT
+    out_features = cfg.MODEL.RESNETS.OUT_FEATURES
+    depth = cfg.MODEL.RESNETS.DEPTH
+    num_groups = cfg.MODEL.RESNETS.NUM_GROUPS
+    width_per_group = cfg.MODEL.RESNETS.WIDTH_PER_GROUP
     bottleneck_channels = num_groups * width_per_group
-    in_channels         = cfg.MODEL.RESNETS.STEM_OUT_CHANNELS
-    out_channels        = cfg.MODEL.RESNETS.RES2_OUT_CHANNELS
-    stride_in_1x1       = cfg.MODEL.RESNETS.STRIDE_IN_1X1
-    res5_dilation       = cfg.MODEL.RESNETS.RES5_DILATION
+    in_channels = cfg.MODEL.RESNETS.STEM_OUT_CHANNELS
+    out_channels = cfg.MODEL.RESNETS.RES2_OUT_CHANNELS
+    stride_in_1x1 = cfg.MODEL.RESNETS.STRIDE_IN_1X1
+    res5_dilation = cfg.MODEL.RESNETS.RES5_DILATION
     deform_on_per_stage = cfg.MODEL.RESNETS.DEFORM_ON_PER_STAGE
-    deform_modulated    = cfg.MODEL.RESNETS.DEFORM_MODULATED
-    deform_num_groups   = cfg.MODEL.RESNETS.DEFORM_NUM_GROUPS
+    deform_modulated = cfg.MODEL.RESNETS.DEFORM_MODULATED
+    deform_num_groups = cfg.MODEL.RESNETS.DEFORM_NUM_GROUPS
     # fmt: on
     assert res5_dilation in {1, 2}, "res5_dilation cannot be {}.".format(res5_dilation)
 

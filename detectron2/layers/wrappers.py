@@ -8,8 +8,8 @@ These can be removed once https://github.com/pytorch/pytorch/issues/12013
 is implemented
 """
 
-import warnings
 from typing import List, Optional
+
 import torch
 from torch.nn import functional as F
 
@@ -102,23 +102,6 @@ class Conv2d(torch.nn.Conv2d):
         self.activation = activation
 
     def forward(self, x):
-        # torchscript does not support SyncBatchNorm yet
-        # https://github.com/pytorch/pytorch/issues/40507
-        # and we skip these codes in torchscript since:
-        # 1. currently we only support torchscript in evaluation mode
-        # 2. features needed by exporting module to torchscript are added in PyTorch 1.6 or
-        # later version, `Conv2d` in these PyTorch versions has already supported empty inputs.
-        if not torch.jit.is_scripting():
-            # Dynamo doesn't support context managers yet
-            is_dynamo_compiling = check_if_dynamo_compiling()
-            if not is_dynamo_compiling:
-                with warnings.catch_warnings(record=True):
-                    if x.numel() == 0 and self.training:
-                        # https://github.com/pytorch/pytorch/issues/12013
-                        assert not isinstance(
-                            self.norm, torch.nn.SyncBatchNorm
-                        ), "SyncBatchNorm does not support empty inputs!"
-
         x = F.conv2d(
             x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups
         )

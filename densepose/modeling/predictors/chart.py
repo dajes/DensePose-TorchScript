@@ -5,8 +5,6 @@ from torch import nn
 
 from detectron2.config import CfgNode
 from detectron2.layers import ConvTranspose2d, interpolate
-
-from ...structures import DensePoseChartPredictorOutput
 from .registry import DENSEPOSE_PREDICTOR_REGISTRY
 
 
@@ -59,7 +57,7 @@ class DensePoseChartPredictor(nn.Module):
         self.v_lowres = ConvTranspose2d(
             dim_in, dim_out_patches, kernel_size, stride=2, padding=int(kernel_size / 2 - 1)
         )
-        self.scale_factor = cfg.MODEL.ROI_DENSEPOSE_HEAD.UP_SCALE
+        self.scale_factor = float(cfg.MODEL.ROI_DENSEPOSE_HEAD.UP_SCALE)
 
     def interp2d(self, tensor_nchw: torch.Tensor):
         """
@@ -82,9 +80,9 @@ class DensePoseChartPredictor(nn.Module):
         Args:
             head_outputs (tensor): DensePose head outputs, tensor of shape [N, D, H, W]
         Return:
-           An instance of DensePoseChartPredictorOutput
+           An instance
         """
-        return DensePoseChartPredictorOutput(
+        return dict(
             coarse_segm=self.interp2d(self.ann_index_lowres(head_outputs)),
             fine_segm=self.interp2d(self.index_uv_lowres(head_outputs)),
             u=self.interp2d(self.u_lowres(head_outputs)),

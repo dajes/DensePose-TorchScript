@@ -5,7 +5,7 @@ from typing import List
 import torch
 
 from detectron2.config import CfgNode
-from detectron2.structures import Instances, matched_pairwise_iou
+from detectron2.structures import matched_pairwise_iou
 
 
 class DensePoseDataFilter:
@@ -14,7 +14,7 @@ class DensePoseDataFilter:
         self.keep_masks = cfg.MODEL.ROI_DENSEPOSE_HEAD.COARSE_SEGM_TRAINED_BY_MASKS
 
     @torch.no_grad()
-    def __call__(self, features: List[torch.Tensor], proposals_with_targets: List[Instances]):
+    def __call__(self, features: List[torch.Tensor], proposals_with_targets: List):
         """
         Filters proposals with targets to keep only the ones relevant for
         DensePose training
@@ -25,12 +25,11 @@ class DensePoseDataFilter:
                 images `N` in the input data; axes 1-3 are channels,
                 height, and width, which may vary between features
                 (e.g., if a feature pyramid is used).
-            proposals_with_targets (list[Instances]): length `N` list of
-                `Instances`. The i-th `Instances` contains instances
+            proposals_with_targets (list): length `N` list of. The i-th contains instances
                 (proposals, GT) for the i-th input image,
         Returns:
             list[Tensor]: filtered features
-            list[Instances]: filtered proposals
+            list[]: filtered proposals
         """
         proposals_filtered = []
         # TODO: the commented out code was supposed to correctly deal with situations

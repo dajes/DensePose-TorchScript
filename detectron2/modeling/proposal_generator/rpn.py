@@ -1,20 +1,18 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Tuple, Union
+
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from detectron2.config import configurable
-from detectron2.layers import Conv2d, cat
-from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
+from detectron2.layers import Conv2d
 from detectron2.utils.registry import Registry
-
-from ..anchor_generator import build_anchor_generator
-from ..box_regression import Box2BoxTransform, _dense_box_regression_loss
-from ..matcher import Matcher
-from ..sampling import subsample_labels
 from .build import PROPOSAL_GENERATOR_REGISTRY
 from .proposal_utils import find_top_rpn_proposals
+from ..anchor_generator import build_anchor_generator
+from ..box_regression import Box2BoxTransform
+from ..matcher import Matcher
+from ..sampling import subsample_labels
 
 RPN_HEAD_REGISTRY = Registry("RPN_HEAD")
 RPN_HEAD_REGISTRY.__doc__ = """
@@ -24,7 +22,6 @@ objectness classification and bounding box regression for anchors.
 The registered object will be called with `obj(cfg, input_shape)`.
 The call should return a `nn.Module` object.
 """
-
 
 """
 Shape shorthand in this module:
@@ -72,7 +69,7 @@ class StandardRPNHead(nn.Module):
 
     @configurable
     def __init__(
-        self, *, in_channels: int, num_anchors: int, box_dim: int = 4, conv_dims: List[int] = (-1,)
+            self, *, in_channels: int, num_anchors: int, box_dim: int = 4, conv_dims: List[int] = (-1,)
     ):
         """
         NOTE: this interface is experimental.
@@ -144,7 +141,7 @@ class StandardRPNHead(nn.Module):
         num_anchors = anchor_generator.num_anchors
         box_dim = anchor_generator.box_dim
         assert (
-            len(set(num_anchors)) == 1
+                len(set(num_anchors)) == 1
         ), "Each level must have the same number of anchors per spatial position"
         return {
             "in_channels": in_channels,
@@ -183,23 +180,23 @@ class RPN(nn.Module):
 
     @configurable
     def __init__(
-        self,
-        *,
-        in_features: List[str],
-        head: nn.Module,
-        anchor_generator: nn.Module,
-        anchor_matcher: Matcher,
-        box2box_transform: Box2BoxTransform,
-        batch_size_per_image: int,
-        positive_fraction: float,
-        pre_nms_topk: Tuple[float, float],
-        post_nms_topk: Tuple[float, float],
-        nms_thresh: float = 0.7,
-        min_box_size: float = 0.0,
-        anchor_boundary_thresh: float = -1.0,
-        loss_weight: Union[float, Dict[str, float]] = 1.0,
-        box_reg_loss_type: str = "smooth_l1",
-        smooth_l1_beta: float = 0.0,
+            self,
+            *,
+            in_features: List[str],
+            head: nn.Module,
+            anchor_generator: nn.Module,
+            anchor_matcher: Matcher,
+            box2box_transform: Box2BoxTransform,
+            batch_size_per_image: int,
+            positive_fraction: float,
+            pre_nms_topk: Tuple[float, float],
+            post_nms_topk: Tuple[float, float],
+            nms_thresh: float = 0.7,
+            min_box_size: float = 0.0,
+            anchor_boundary_thresh: float = -1.0,
+            loss_weight: Union[float, Dict[str, float]] = 1.0,
+            box_reg_loss_type: str = "smooth_l1",
+            smooth_l1_beta: float = 0.0,
     ):
         """
         NOTE: this interface is experimental.
@@ -300,146 +297,23 @@ class RPN(nn.Module):
         label.scatter_(0, neg_idx, 0)
         return label
 
-    @torch.jit.unused
-    @torch.no_grad()
-    def label_and_sample_anchors(
-        self, anchors: List[Boxes], gt_instances: List[Instances]
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        """
-        Args:
-            anchors (list[Boxes]): anchors for each feature map.
-            gt_instances: the ground-truth instances for each image.
-
-        Returns:
-            list[Tensor]:
-                List of #img tensors. i-th element is a vector of labels whose length is
-                the total number of anchors across all feature maps R = sum(Hi * Wi * A).
-                Label values are in {-1, 0, 1}, with meanings: -1 = ignore; 0 = negative
-                class; 1 = positive class.
-            list[Tensor]:
-                i-th element is a Rx4 tensor. The values are the matched gt boxes for each
-                anchor. Values are undefined for those anchors not labeled as 1.
-        """
-        anchors = Boxes.cat(anchors)
-
-        gt_boxes = [x.gt_boxes for x in gt_instances]
-        image_sizes = [x.image_size for x in gt_instances]
-        del gt_instances
-
-        gt_labels = []
-        matched_gt_boxes = []
-        for image_size_i, gt_boxes_i in zip(image_sizes, gt_boxes):
-            """
-            image_size_i: (h, w) for the i-th image
-            gt_boxes_i: ground-truth boxes for i-th image
-            """
-
-            match_quality_matrix = pairwise_iou(gt_boxes_i, anchors)
-            matched_idxs, gt_labels_i = self.anchor_matcher(match_quality_matrix)
-            # Matching is memory-expensive and may result in CPU tensors. But the result is small
-            gt_labels_i = gt_labels_i.to(device=gt_boxes_i.device)
-            del match_quality_matrix
-
-            if self.anchor_boundary_thresh >= 0:
-                # Discard anchors that go out of the boundaries of the image
-                # NOTE: This is legacy functionality that is turned off by default in Detectron2
-                anchors_inside_image = anchors.inside_box(image_size_i, self.anchor_boundary_thresh)
-                gt_labels_i[~anchors_inside_image] = -1
-
-            # A vector of labels (-1, 0, 1) for each anchor
-            gt_labels_i = self._subsample_labels(gt_labels_i)
-
-            if len(gt_boxes_i) == 0:
-                # These values won't be used anyway since the anchor is labeled as background
-                matched_gt_boxes_i = torch.zeros_like(anchors.tensor)
-            else:
-                # TODO wasted indexing computation for ignored boxes
-                matched_gt_boxes_i = gt_boxes_i[matched_idxs].tensor
-
-            gt_labels.append(gt_labels_i)  # N,AHW
-            matched_gt_boxes.append(matched_gt_boxes_i)
-        return gt_labels, matched_gt_boxes
-
-    @torch.jit.unused
-    def losses(
-        self,
-        anchors: List[Boxes],
-        pred_objectness_logits: List[torch.Tensor],
-        gt_labels: List[torch.Tensor],
-        pred_anchor_deltas: List[torch.Tensor],
-        gt_boxes: List[torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Return the losses from a set of RPN predictions and their associated ground-truth.
-
-        Args:
-            anchors (list[Boxes or RotatedBoxes]): anchors for each feature map, each
-                has shape (Hi*Wi*A, B), where B is box dimension (4 or 5).
-            pred_objectness_logits (list[Tensor]): A list of L elements.
-                Element i is a tensor of shape (N, Hi*Wi*A) representing
-                the predicted objectness logits for all anchors.
-            gt_labels (list[Tensor]): Output of :meth:`label_and_sample_anchors`.
-            pred_anchor_deltas (list[Tensor]): A list of L elements. Element i is a tensor of shape
-                (N, Hi*Wi*A, 4 or 5) representing the predicted "deltas" used to transform anchors
-                to proposals.
-            gt_boxes (list[Tensor]): Output of :meth:`label_and_sample_anchors`.
-
-        Returns:
-            dict[loss name -> loss value]: A dict mapping from loss name to loss value.
-                Loss names are: `loss_rpn_cls` for objectness classification and
-                `loss_rpn_loc` for proposal localization.
-        """
-        num_images = len(gt_labels)
-        gt_labels = torch.stack(gt_labels)  # (N, sum(Hi*Wi*Ai))
-
-        # Log the number of positive/negative anchors per-image that's used in training
-        pos_mask = gt_labels == 1
-        num_pos_anchors = pos_mask.sum().item()
-        num_neg_anchors = (gt_labels == 0).sum().item()
-        localization_loss = _dense_box_regression_loss(
-            anchors,
-            self.box2box_transform,
-            pred_anchor_deltas,
-            gt_boxes,
-            pos_mask,
-            box_reg_loss_type=self.box_reg_loss_type,
-            smooth_l1_beta=self.smooth_l1_beta,
-        )
-
-        valid_mask = gt_labels >= 0
-        objectness_loss = F.binary_cross_entropy_with_logits(
-            cat(pred_objectness_logits, dim=1)[valid_mask],
-            gt_labels[valid_mask].to(torch.float32),
-            reduction="sum",
-        )
-        normalizer = self.batch_size_per_image * num_images
-        losses = {
-            "loss_rpn_cls": objectness_loss / normalizer,
-            # The original Faster R-CNN paper uses a slightly different normalizer
-            # for loc loss. But it doesn't matter in practice
-            "loss_rpn_loc": localization_loss / normalizer,
-        }
-        losses = {k: v * self.loss_weight.get(k, 1.0) for k, v in losses.items()}
-        return losses
-
     def forward(
-        self,
-        images: ImageList,
-        features: Dict[str, torch.Tensor],
-        gt_instances: Optional[List[Instances]] = None,
+            self,
+            images: torch.Tensor,
+            features: Dict[str, torch.Tensor],
     ):
         """
         Args:
-            images (ImageList): input images of length `N`
+            images: input images of length `N`
             features (dict[str, Tensor]): input data as a mapping from feature
                 map name to tensor. Axis 0 represents the number of images `N` in
                 the input data; axes 1-3 are channels, height, and width, which may
                 vary between feature maps (e.g., if a feature pyramid is used).
-            gt_instances (list[Instances], optional): a length `N` list of `Instances`s.
-                Each `Instances` stores ground-truth instances for the corresponding image.
+            gt_instances (list, optional): a length `N` list of s.
+                Each stores ground-truth instances for the corresponding image.
 
         Returns:
-            proposals: list[Instances]: contains fields "proposal_boxes", "objectness_logits"
+            proposals: list: contains fields "proposal_boxes", "objectness_logits"
             loss: dict[Tensor] or None
         """
         features = [features[f] for f in self.in_features]
@@ -460,32 +334,25 @@ class RPN(nn.Module):
             for x in pred_anchor_deltas
         ]
 
-        if self.training:
-            assert gt_instances is not None, "RPN requires gt_instances in training!"
-            gt_labels, gt_boxes = self.label_and_sample_anchors(anchors, gt_instances)
-            losses = self.losses(
-                anchors, pred_objectness_logits, gt_labels, pred_anchor_deltas, gt_boxes
-            )
-        else:
-            losses = {}
         proposals = self.predict_proposals(
-            anchors, pred_objectness_logits, pred_anchor_deltas, images.image_sizes
+            anchors, pred_objectness_logits, pred_anchor_deltas,
+            [torch.tensor([images.shape[3], images.shape[2]], dtype=torch.int64)]
         )
-        return proposals, losses
+        return proposals, {}
 
     def predict_proposals(
-        self,
-        anchors: List[Boxes],
-        pred_objectness_logits: List[torch.Tensor],
-        pred_anchor_deltas: List[torch.Tensor],
-        image_sizes: List[Tuple[int, int]],
+            self,
+            anchors: List[torch.Tensor],
+            pred_objectness_logits: List[torch.Tensor],
+            pred_anchor_deltas: List[torch.Tensor],
+            image_sizes: List[torch.Tensor],
     ):
         """
         Decode all the predicted box regression deltas to proposals. Find the top proposals
         by applying NMS and removing boxes that are too small.
 
         Returns:
-            proposals (list[Instances]): list of N Instances. The i-th Instances
+            proposals (list): list of N. The i-th
                 stores post_nms_topk object proposals for image i, sorted by their
                 objectness score in descending order.
         """
@@ -505,7 +372,7 @@ class RPN(nn.Module):
                 self.training,
             )
 
-    def _decode_proposals(self, anchors: List[Boxes], pred_anchor_deltas: List[torch.Tensor]):
+    def _decode_proposals(self, anchors: List[torch.Tensor], pred_anchor_deltas: List[torch.Tensor]):
         """
         Transform anchors into proposals by applying the predicted anchor deltas.
 
@@ -517,10 +384,10 @@ class RPN(nn.Module):
         proposals = []
         # For each feature map
         for anchors_i, pred_anchor_deltas_i in zip(anchors, pred_anchor_deltas):
-            B = anchors_i.tensor.size(1)
+            B = anchors_i.size(1)
             pred_anchor_deltas_i = pred_anchor_deltas_i.reshape(-1, B)
             # Expand anchors to shape (N*Hi*Wi*A, B)
-            anchors_i = anchors_i.tensor.unsqueeze(0).expand(N, -1, -1).reshape(-1, B)
+            anchors_i = anchors_i.unsqueeze(0).expand(N, -1, -1).reshape(-1, B)
             proposals_i = self.box2box_transform.apply_deltas(pred_anchor_deltas_i, anchors_i)
             # Append feature map proposals with shape (N, Hi*Wi*A, B)
             proposals.append(proposals_i.view(N, -1, B))

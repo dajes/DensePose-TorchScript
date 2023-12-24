@@ -229,7 +229,7 @@ class DefaultAnchorGenerator(nn.Module):
         """
         grid_sizes = [feature_map.shape[-2:] for feature_map in features]
         anchors_over_all_feature_maps = self._grid_anchors(grid_sizes)
-        return [Boxes(x) for x in anchors_over_all_feature_maps]
+        return anchors_over_all_feature_maps
 
 
 def build_anchor_generator(cfg, input_shape):

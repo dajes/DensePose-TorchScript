@@ -3,10 +3,10 @@ import argparse
 import cv2
 import numpy as np
 import torch
-from detectron2.engine.defaults import DefaultPredictor
 
 from densepose import add_densepose_config
 from detectron2.config import get_cfg
+from detectron2.engine.defaults import DefaultPredictor
 
 
 def main():
@@ -40,15 +40,19 @@ def main():
     from densepose.vis.extractor import DensePoseResultExtractor
     visualizer = DensePoseResultsFineSegmentationVisualizer(cfg)
     extractor = DensePoseResultExtractor()
-    for file_name in file_list:
-        img = cv2.imread(file_name)  # predictor expects BGR image.
-        with torch.no_grad():
-            outputs = predictor(img)["instances"]
-        image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        image = np.tile(image[:, :, np.newaxis], [1, 1, 3])
-        data = extractor(outputs)
-        image_vis = visualizer.visualize(image, data)
-        break
+    img = cv2.imread(args.input)
+    tensor = torch.from_numpy(img)
+    outputs = predictor(tensor)
+    image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    image = np.tile(image[:, :, np.newaxis], [1, 1, 3])
+    data = extractor(outputs)
+    image_vis = visualizer.visualize(image, data)
+    predictor = torch.jit.script(predictor)
+    outputs2 = predictor(tensor)
+    data2 = extractor(outputs2)
+    image_vis2 = visualizer.visualize(image, data2)
+    diff = np.abs(image_vis.astype(np.int16) - image_vis2).astype(np.uint8)
+    return diff
 
 
 if __name__ == "__main__":

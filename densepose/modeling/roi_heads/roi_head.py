@@ -1,17 +1,15 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 
-import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List
+
 import fvcore.nn.weight_init as weight_init
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 
 from detectron2.layers import Conv2d, get_norm
 from detectron2.modeling import ROI_HEADS_REGISTRY, StandardROIHeads
 from detectron2.modeling.poolers import ROIPooler
-from detectron2.structures import ImageList, Instances
-
 from .. import (
     build_densepose_data_filter,
     build_densepose_embedder,
@@ -32,16 +30,16 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
 
         # fmt: off
-        self.in_features      = in_features
-        feature_strides       = {k: v['stride'] for k, v in input_shape.items()}
-        feature_channels      = {k: v['channels'] for k, v in input_shape.items()}
-        num_classes           = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_NUM_CLASSES
-        conv_dims             = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_CONV_DIMS
-        self.common_stride    = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_COMMON_STRIDE
-        norm                  = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_NORM
+        self.in_features = in_features
+        feature_strides = {k: v['stride'] for k, v in input_shape.items()}
+        feature_channels = {k: v['channels'] for k, v in input_shape.items()}
+        num_classes = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_NUM_CLASSES
+        conv_dims = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_CONV_DIMS
+        self.common_stride = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_COMMON_STRIDE
+        norm = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_NORM
         # fmt: on
 
-        self.scale_heads = []
+        scale_heads = []
         for in_feature in self.in_features:
             head_ops = []
             head_length = max(
@@ -56,7 +54,7 @@ class Decoder(nn.Module):
                     padding=1,
                     bias=not norm,
                     norm=get_norm(norm, conv_dims),
-                    activation=F.relu,
+                    activation=nn.ReLU(),
                 )
                 weight_init.c2_msra_fill(conv)
                 head_ops.append(conv)
@@ -64,17 +62,19 @@ class Decoder(nn.Module):
                     head_ops.append(
                         nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
                     )
-            self.scale_heads.append(nn.Sequential(*head_ops))
-            self.add_module(in_feature, self.scale_heads[-1])
+            scale_heads.append(nn.Sequential(*head_ops))
+            self.add_module(in_feature, scale_heads[-1])
+        self.scale_heads = nn.ModuleList(scale_heads)
         self.predictor = Conv2d(conv_dims, num_classes, kernel_size=1, stride=1, padding=0)
         weight_init.c2_msra_fill(self.predictor)
 
     def forward(self, features: List[torch.Tensor]):
-        for i, _ in enumerate(self.in_features):
+        x = features[0]
+        for i, head in enumerate(self.scale_heads):
             if i == 0:
-                x = self.scale_heads[i](features[i])
+                x = head(features[i])
             else:
-                x = x + self.scale_heads[i](features[i])
+                x = x + head(features[i])
         x = self.predictor(x)
         return x
 
@@ -91,14 +91,14 @@ class DensePoseROIHeads(StandardROIHeads):
 
     def _init_densepose_head(self, cfg, input_shape):
         # fmt: off
-        self.densepose_on          = cfg.MODEL.DENSEPOSE_ON
+        self.densepose_on = cfg.MODEL.DENSEPOSE_ON
         if not self.densepose_on:
             return
         self.densepose_data_filter = build_densepose_data_filter(cfg)
-        dp_pooler_resolution       = cfg.MODEL.ROI_DENSEPOSE_HEAD.POOLER_RESOLUTION
-        dp_pooler_sampling_ratio   = cfg.MODEL.ROI_DENSEPOSE_HEAD.POOLER_SAMPLING_RATIO
-        dp_pooler_type             = cfg.MODEL.ROI_DENSEPOSE_HEAD.POOLER_TYPE
-        self.use_decoder           = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_ON
+        dp_pooler_resolution = cfg.MODEL.ROI_DENSEPOSE_HEAD.POOLER_RESOLUTION
+        dp_pooler_sampling_ratio = cfg.MODEL.ROI_DENSEPOSE_HEAD.POOLER_SAMPLING_RATIO
+        dp_pooler_type = cfg.MODEL.ROI_DENSEPOSE_HEAD.POOLER_TYPE
+        self.use_decoder = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_ON
         # fmt: on
         if self.use_decoder:
             dp_pooler_scales = (1.0 / input_shape[self.in_features[0]]['stride'],)
@@ -121,7 +121,7 @@ class DensePoseROIHeads(StandardROIHeads):
         )
         self.embedder = build_densepose_embedder(cfg)
 
-    def _forward_densepose(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
+    def _forward_densepose(self, features: Dict[str, torch.Tensor], instances: List[Dict[str, torch.Tensor]]):
         """
         Forward logic of the densepose prediction branch.
 
@@ -130,8 +130,8 @@ class DensePoseROIHeads(StandardROIHeads):
                 map name to tensor. Axis 0 represents the number of images `N` in
                 the input data; axes 1-3 are channels, height, and width, which may
                 vary between feature maps (e.g., if a feature pyramid is used).
-            instances (list[Instances]): length `N` list of `Instances`. The i-th
-                `Instances` contains instances for the i-th input image,
+            instances (list): length `N` list of. The i-th
+                contains instances for the i-th input image,
                 In training, they can be the proposals.
                 In inference, they can be the predicted boxes.
 
@@ -140,40 +140,23 @@ class DensePoseROIHeads(StandardROIHeads):
             In inference, update `instances` with new fields "densepose" and return it.
         """
         if not self.densepose_on:
-            return {} if self.training else instances
+            return instances
 
         features_list = [features[f] for f in self.in_features]
-        pred_boxes = [x.pred_boxes for x in instances]
+        pred_boxes = [x['pred_boxes'] for x in instances]
 
         if self.use_decoder:
             features_list = [self.decoder(features_list)]
 
         features_dp = self.densepose_pooler(features_list, pred_boxes)
-        if len(features_dp) > 0:
-            densepose_head_outputs = self.densepose_head(features_dp)
-            densepose_predictor_outputs = self.densepose_predictor(densepose_head_outputs)
-        else:
-            densepose_predictor_outputs = None
+        densepose_head_outputs = self.densepose_head(features_dp)
+        densepose_predictor_outputs = self.densepose_predictor(densepose_head_outputs)
 
         densepose_inference(densepose_predictor_outputs, instances)
         return instances
 
-    def forward(
-        self,
-        images: ImageList,
-        features: Dict[str, torch.Tensor],
-        proposals: List[Instances],
-        targets: Optional[List[Instances]] = None,
-    ):
-        instances, losses = super().forward(images, features, proposals, targets)
-        del targets, images
-
-        if self.training:
-            losses.update(self._forward_densepose(features, instances))
-        return instances, losses
-
     def forward_with_given_boxes(
-        self, features: Dict[str, torch.Tensor], instances: List[Instances]
+            self, features: Dict[str, torch.Tensor], instances: List[Dict[str, torch.Tensor]]
     ):
         """
         Use the given boxes in `instances` to produce other (non-box) per-ROI outputs.
@@ -184,15 +167,16 @@ class DensePoseROIHeads(StandardROIHeads):
 
         Args:
             features: same as in `forward()`
-            instances (list[Instances]): instances to predict other outputs. Expect the keys
+            instances (list): instances to predict other outputs. Expect the keys
                 "pred_boxes" and "pred_classes" to exist.
 
         Returns:
-            instances (list[Instances]):
-                the same `Instances` objects, with extra
+            instances (list):
+                the same objects, with extra
                 fields such as `pred_masks` or `pred_keypoints`.
         """
 
-        instances = super().forward_with_given_boxes(features, instances)
+        instances = self._forward_mask(features, instances)
+        instances = self._forward_keypoint(features, instances)
         instances = self._forward_densepose(features, instances)
         return instances

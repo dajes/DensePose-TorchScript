@@ -36,8 +36,11 @@ class DensePoseDeepLabHead(nn.Module):
         if self.use_nonlocal:
             self.NLBlock = NONLocalBlock2D(input_channels, bn_layer=True)
             self.add_module("NLBlock", self.NLBlock)
+        else:
+            self.NLBlock = nn.Identity()
         # weight_init.c2_msra_fill(self.ASPP)
 
+        stacked_convs = []
         for i in range(self.n_stacked_convs):
             norm_module = nn.GroupNorm(32, hidden_dim) if norm == "GN" else None
             layer = Conv2d(
@@ -53,6 +56,8 @@ class DensePoseDeepLabHead(nn.Module):
             n_channels = hidden_dim
             layer_name = self._get_layer_name(i)
             self.add_module(layer_name, layer)
+            stacked_convs.append(layer)
+        self.stacked_convs = nn.ModuleList(stacked_convs)
         self.n_out_channels = hidden_dim
         # initialize_module_params(self)
 
@@ -62,9 +67,8 @@ class DensePoseDeepLabHead(nn.Module):
         if self.use_nonlocal:
             x = self.NLBlock(x)
         output = x
-        for i in range(self.n_stacked_convs):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
+        for i, conv in enumerate(self.stacked_convs):
+            x = conv(x)
             x = F.relu(x)
             output = x
         return output
@@ -100,7 +104,8 @@ class ASPPPooling(nn.Sequential):
 
     def forward(self, x):
         size = x.shape[-2:]
-        x = super(ASPPPooling, self).forward(x)
+        for module in self:
+            x = module(x)
         return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
 

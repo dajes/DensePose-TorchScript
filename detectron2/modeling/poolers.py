@@ -1,12 +1,13 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import math
 from typing import List, Optional
+
 import torch
 from torch import nn
 from torchvision.ops import RoIPool
 
 from detectron2.layers import ROIAlign, cat, nonzero_tuple, shapes_to_tensor
-from detectron2.structures import Boxes
+from detectron2.structures import Boxes, boxes_area
 
 """
 To export ROIPooler to torchscript, in this file, variables that should be annotated with
@@ -20,11 +21,11 @@ __all__ = ["ROIPooler"]
 
 
 def assign_boxes_to_levels(
-    box_lists: List[Boxes],
-    min_level: int,
-    max_level: int,
-    canonical_box_size: int,
-    canonical_level: int,
+        box_lists: List[torch.Tensor],
+        min_level: int,
+        max_level: int,
+        canonical_box_size: int,
+        canonical_level: int,
 ):
     """
     Map each box in `box_lists` to a feature map level index and return the assignment
@@ -47,7 +48,7 @@ def assign_boxes_to_levels(
             `self.min_level`, for the corresponding box (so value i means the box is at
             `self.min_level + i`).
     """
-    box_sizes = torch.sqrt(cat([boxes.area() for boxes in box_lists]))
+    box_sizes = torch.sqrt(cat([boxes_area(boxes) for boxes in box_lists]))
     # Eqn.(1) in FPN paper
     level_assignments = torch.floor(
         canonical_level + torch.log2(box_sizes / canonical_box_size + 1e-8)
@@ -68,7 +69,7 @@ def _convert_boxes_to_pooler_format(boxes: torch.Tensor, sizes: torch.Tensor) ->
     return cat([indices[:, None], boxes], dim=1)
 
 
-def convert_boxes_to_pooler_format(box_lists: List[Boxes]):
+def convert_boxes_to_pooler_format(box_lists: List[torch.Tensor]):
     """
     Convert all boxes in `box_lists` to the low-level format used by ROI pooling ops
     (see description under Returns).
@@ -91,19 +92,19 @@ def convert_boxes_to_pooler_format(box_lists: List[Boxes]):
             where batch index is the index in [0, N) identifying which batch image the
             rotated box (x_ctr, y_ctr, width, height, angle_degrees) comes from.
     """
-    boxes = torch.cat([x.tensor for x in box_lists], dim=0)
+    boxes = torch.cat(box_lists, dim=0)
     # __len__ returns Tensor in tracing.
-    sizes = shapes_to_tensor([x.__len__() for x in box_lists])
+    sizes = shapes_to_tensor([x.shape[0] for x in box_lists])
     return _convert_boxes_to_pooler_format(boxes, sizes)
 
 
 @torch.jit.script_if_tracing
 def _create_zeros(
-    batch_target: Optional[torch.Tensor],
-    channels: int,
-    height: int,
-    width: int,
-    like_tensor: torch.Tensor,
+        batch_target: Optional[torch.Tensor],
+        channels: int,
+        height: int,
+        width: int,
+        like_tensor: torch.Tensor,
 ) -> torch.Tensor:
     batches = batch_target.shape[0] if batch_target is not None else 0
     sizes = (batches, channels, height, width)
@@ -117,13 +118,13 @@ class ROIPooler(nn.Module):
     """
 
     def __init__(
-        self,
-        output_size,
-        scales,
-        sampling_ratio,
-        pooler_type,
-        canonical_box_size=224,
-        canonical_level=4,
+            self,
+            output_size,
+            scales,
+            sampling_ratio,
+            pooler_type,
+            canonical_box_size=224,
+            canonical_level=4,
     ):
         """
         Args:
@@ -190,14 +191,14 @@ class ROIPooler(nn.Module):
         self.min_level = int(min_level)
         self.max_level = int(max_level)
         assert (
-            len(scales) == self.max_level - self.min_level + 1
+                len(scales) == self.max_level - self.min_level + 1
         ), "[ROIPooler] Sizes of input featuremaps do not form a pyramid!"
         assert 0 <= self.min_level and self.min_level <= self.max_level
         self.canonical_level = canonical_level
         assert canonical_box_size > 0
         self.canonical_box_size = canonical_box_size
 
-    def forward(self, x: List[torch.Tensor], box_lists: List[Boxes]):
+    def forward(self, x: List[torch.Tensor], box_lists: List[torch.Tensor]):
         """
         Args:
             x (list[Tensor]): A list of feature maps of NCHW shape, with scales matching those

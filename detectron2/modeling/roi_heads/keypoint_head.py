@@ -1,15 +1,15 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 from typing import List
+
 import torch
 from torch import nn
 
 from detectron2.config import configurable
 from detectron2.layers import Conv2d, ConvTranspose2d, cat, interpolate
-from detectron2.structures import Instances, heatmaps_to_keypoints
+from detectron2.structures import heatmaps_to_keypoints
 from detectron2.utils.registry import Registry
 
 _TOTAL_SKIPPED = 0
-
 
 __all__ = [
     "ROI_KEYPOINT_HEAD_REGISTRY",
@@ -17,7 +17,6 @@ __all__ = [
     "BaseKeypointRCNNHead",
     "KRCNNConvDeconvUpsampleHead",
 ]
-
 
 ROI_KEYPOINT_HEAD_REGISTRY = Registry("ROI_KEYPOINT_HEAD")
 ROI_KEYPOINT_HEAD_REGISTRY.__doc__ = """
@@ -35,7 +34,7 @@ def build_keypoint_head(cfg, input_shape):
     return ROI_KEYPOINT_HEAD_REGISTRY.get(name)(cfg, input_shape)
 
 
-def keypoint_rcnn_inference(pred_keypoint_logits: torch.Tensor, pred_instances: List[Instances]):
+def keypoint_rcnn_inference(pred_keypoint_logits: torch.Tensor, pred_instances: List[torch.Tensor]):
     """
     Post process each predicted keypoint heatmap in `pred_keypoint_logits` into (x, y, score)
         and add it to the `pred_instances` as a `pred_keypoints` field.
@@ -44,7 +43,7 @@ def keypoint_rcnn_inference(pred_keypoint_logits: torch.Tensor, pred_instances: 
         pred_keypoint_logits (Tensor): A tensor of shape (R, K, S, S) where R is the total number
            of instances in the batch, K is the number of keypoints, and S is the side length of
            the keypoint heatmap. The values are spatial logits.
-        pred_instances (list[Instances]): A list of N Instances, where N is the number of images.
+        pred_instances (list): A list of N, where N is the number of images.
 
     Returns:
         None. Each element in pred_instances will contain extra "pred_keypoints" and
@@ -63,7 +62,7 @@ def keypoint_rcnn_inference(pred_keypoint_logits: torch.Tensor, pred_instances: 
     heatmap_results = pred_keypoint_logits.split(num_instances_per_image, dim=0)
 
     for keypoint_results_per_image, heatmap_results_per_image, instances_per_image in zip(
-        keypoint_results, heatmap_results, pred_instances
+            keypoint_results, heatmap_results, pred_instances
     ):
         # keypoint_results_per_image is (num instances)x(num keypoints)x(x, y, score)
         # heatmap_results_per_image is (num instances)x(num keypoints)x(side)x(side)
@@ -109,17 +108,17 @@ class BaseKeypointRCNNHead(nn.Module):
             batch_size_per_image = cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE
             positive_sample_fraction = cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION
             ret["loss_normalizer"] = (
-                ret["num_keypoints"] * batch_size_per_image * positive_sample_fraction
+                    ret["num_keypoints"] * batch_size_per_image * positive_sample_fraction
             )
         else:
             ret["loss_normalizer"] = "visible"
         return ret
 
-    def forward(self, x, instances: List[Instances]):
+    def forward(self, x, instances: List[torch.Tensor]):
         """
         Args:
             x: input 4D region feature(s) provided by :class:`ROIHeads`.
-            instances (list[Instances]): contains the boxes & labels corresponding
+            instances (list): contains the boxes & labels corresponding
                 to the input features.
                 Exact format is up to its caller to decide.
                 Typically, this is the foreground instances in training, with

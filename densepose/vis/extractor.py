@@ -5,8 +5,7 @@ from typing import Optional
 import torch
 from torch.nn import functional as F
 
-from densepose.structures import DensePoseChartPredictorOutput
-from detectron2.structures import Boxes, Instances, BoxMode
+from detectron2.structures import Boxes
 
 
 class BaseConverter:
@@ -78,15 +77,7 @@ class BaseConverter:
             An instance of the destination type obtained from the source instance
             Raises KeyError, if no suitable converter found
         """
-        instance_type = type(instance)
-        converter = cls._lookup_converter(instance_type)
-        if converter is None:
-            if cls.dst_type is None:  # pyre-ignore[16]
-                output_type_str = "itself"
-            else:
-                output_type_str = cls.dst_type
-            raise KeyError(f"Could not find converter from {instance_type} to {output_type_str}")
-        return converter(instance, *args, **kwargs)
+        return densepose_chart_predictor_output_to_result_with_confidences(instance, *args, **kwargs)
 
 
 @dataclass
@@ -218,8 +209,8 @@ def resample_fine_and_coarse_segm_to_bbox(predictor_output: Any, box_xywh_abs):
         Labels for each pixel of the bounding box, a long tensor of size [1, H, W]
     """
     return resample_fine_and_coarse_segm_tensors_to_bbox(
-        predictor_output.fine_segm,
-        predictor_output.coarse_segm,
+        predictor_output['fine_segm'],
+        predictor_output['coarse_segm'],
         box_xywh_abs,
     )
 
@@ -255,32 +246,20 @@ def resample_uv_tensors_to_bbox(
 
 
 def resample_uv_to_bbox(
-        predictor_output: DensePoseChartPredictorOutput,
+        predictor_output: Dict[str, torch.Tensor],
         labels: torch.Tensor,
         box_xywh_abs,
 ) -> torch.Tensor:
-    """
-    Resamples U and V coordinate estimates for the given bounding box
-
-    Args:
-        predictor_output (DensePoseChartPredictorOutput): DensePose predictor
-            output to be resampled
-        labels (tensor [H, W] of long): labels obtained by resampling segmentation
-            outputs for the given bounding box
-        box_xywh_abs (tuple of 4 int): bounding box that corresponds to predictor outputs
-    Return:
-       Resampled U and V coordinates - a tensor [2, H, W] of float
-    """
     return resample_uv_tensors_to_bbox(
-        predictor_output.u,
-        predictor_output.v,
+        predictor_output['u'],
+        predictor_output['v'],
         labels,
         box_xywh_abs,
     )
 
 
 def resample_confidences_to_bbox(
-        predictor_output: DensePoseChartPredictorOutput,
+        predictor_output: Dict[str, torch.Tensor],
         labels: torch.Tensor,
         box_xywh_abs,
 ) -> Dict[str, torch.Tensor]:
@@ -288,7 +267,7 @@ def resample_confidences_to_bbox(
     Resamples confidences for the given bounding box
 
     Args:
-        predictor_output (DensePoseChartPredictorOutput): DensePose predictor
+        predictor_output: DensePose predictor
             output to be resampled
         labels (tensor [H, W] of long): labels obtained by resampling segmentation
             outputs for the given bounding box
@@ -310,27 +289,25 @@ def resample_confidences_to_bbox(
         "coarse_segm_confidence",
     ]
     confidence_results = {key: None for key in confidence_names}
-    confidence_names = [
-        key for key in confidence_names if getattr(predictor_output, key) is not None
-    ]
-    confidence_base = torch.zeros([h, w], dtype=torch.float32, device=predictor_output.u.device)
+    confidence_names = [key for key in confidence_names if predictor_output.get(key, None) is not None]
+    confidence_base = torch.zeros([h, w], dtype=torch.float32, device=predictor_output['u'].device)
 
     # assign data from channels that correspond to the labels
     for key in confidence_names:
         resampled_confidence = F.interpolate(
-            getattr(predictor_output, key),
+            predictor_output[key],
             (h, w),
             mode="bilinear",
             align_corners=False,
         )
         result = confidence_base.clone()
-        for part_id in range(1, predictor_output.u.size(1)):
-            if resampled_confidence.size(1) != predictor_output.u.size(1):
+        for part_id in range(1, predictor_output['u'].size(1)):
+            if resampled_confidence.size(1) != predictor_output['u'].size(1):
                 # confidence is not part-based, don't try to fill it part by part
                 continue
             result[labels == part_id] = resampled_confidence[0, part_id][labels == part_id]
 
-        if resampled_confidence.size(1) != predictor_output.u.size(1):
+        if resampled_confidence.size(1) != predictor_output['u'].size(1):
             # confidence is not part-based, fill the data with the first channel
             # (targeted for segmentation confidences that have only 1 channel)
             result = resampled_confidence[0, 0]
@@ -341,27 +318,22 @@ def resample_confidences_to_bbox(
 
 
 def densepose_chart_predictor_output_to_result_with_confidences(
-        predictor_output: DensePoseChartPredictorOutput, boxes: Boxes
+        predictor_output: Dict[str, torch.Tensor], boxes: Boxes
 ) -> DensePoseChartResultWithConfidences:
     """
     Convert densepose chart predictor outputs to results
 
     Args:
-        predictor_output (DensePoseChartPredictorOutput): DensePose predictor
+        predictor_output: DensePose predictor
             output with confidences to be converted to results, must contain only 1 output
         boxes (Boxes): bounding box that corresponds to the predictor output,
             must contain only 1 bounding box
     Return:
        DensePose chart-based result with confidences (DensePoseChartResultWithConfidences)
     """
-    assert len(predictor_output) == 1 and len(boxes) == 1, (
-        f"Predictor output to result conversion can operate only single outputs"
-        f", got {len(predictor_output)} predictor outputs and {len(boxes)} boxes"
-    )
-
-    boxes_xyxy_abs = boxes.tensor.clone()
-    boxes_xywh_abs = BoxMode.convert(boxes_xyxy_abs, BoxMode.XYXY_ABS, BoxMode.XYWH_ABS)
-    box_xywh = make_int_box(boxes_xywh_abs[0])
+    boxes_xyxy_abs = boxes.clone()
+    boxes_xyxy_abs[:, 2:] -= boxes_xyxy_abs[:, :2]
+    box_xywh = make_int_box(boxes_xyxy_abs[0])
 
     labels = resample_fine_and_coarse_segm_to_bbox(predictor_output, box_xywh).squeeze(0)
     uv = resample_uv_to_bbox(predictor_output, labels, box_xywh)
@@ -369,37 +341,22 @@ def densepose_chart_predictor_output_to_result_with_confidences(
     return DensePoseChartResultWithConfidences(labels=labels, uv=uv, **confidences)
 
 
-ToChartResultConverterWithConfidences.register(
-    DensePoseChartPredictorOutput, densepose_chart_predictor_output_to_result_with_confidences
-)
-
-
-def extract_boxes_xywh_from_instances(instances: Instances, select=None):
-    if instances.has("pred_boxes"):
-        boxes_xywh = instances.pred_boxes.tensor.clone()
-        boxes_xywh[:, 2] -= boxes_xywh[:, 0]
-        boxes_xywh[:, 3] -= boxes_xywh[:, 1]
-        return boxes_xywh if select is None else boxes_xywh[select]
-    return None
+def extract_boxes_xywh_from_instances(instances):
+    boxes_xywh = instances['pred_boxes'].clone()
+    boxes_xywh[:, 2] -= boxes_xywh[:, 0]
+    boxes_xywh[:, 3] -= boxes_xywh[:, 1]
+    return boxes_xywh
 
 
 class DensePoseResultExtractor:
-    """
-    Extracts DensePose chart result with confidences from instances
-    """
-
-    def __call__(
-            self, instances: Instances, select=None
-    ) -> Tuple[Any, Optional[torch.Tensor]]:
-        if instances.has("pred_densepose") and instances.has("pred_boxes"):
-            dpout = instances.pred_densepose
-            boxes_xyxy = instances.pred_boxes
-            boxes_xywh = extract_boxes_xywh_from_instances(instances)
-            if select is not None:
-                dpout = dpout[select]
-                boxes_xyxy = boxes_xyxy[select]
-            converter = ToChartResultConverterWithConfidences()
-            results = [converter.convert(dpout[i], boxes_xyxy[[i]]) for i in range(len(dpout))]
-            return results, boxes_xywh
-        else:
-            return None, None
+    def __call__(self, instances) -> Tuple[Any, Optional[torch.Tensor]]:
+        boxes_xyxy = instances['pred_boxes']
+        boxes_xywh = extract_boxes_xywh_from_instances(instances)
+        converter = ToChartResultConverterWithConfidences()
+        results = [converter.convert({
+            'coarse_segm': instances['pred_densepose_coarse_segm'][i].unsqueeze(0),
+            'fine_segm': instances['pred_densepose_fine_segm'][i].unsqueeze(0),
+            'u': instances['pred_densepose_u'][i].unsqueeze(0),
+            'v': instances['pred_densepose_v'][i].unsqueeze(0),
+        }, boxes_xyxy[[i]]) for i in range(len(boxes_xyxy))]
+        return results, boxes_xywh
